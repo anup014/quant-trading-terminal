@@ -4,197 +4,242 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime
-import time
 
 # ==========================================================
-# 1. CORE ANALYTICS & DATA RECOVERY ENGINE
+# 1. SMART SEARCH & DATA ENGINE
 # ==========================================================
 
-class QuantEngine:
-    """Handles high-fidelity data extraction with built-in recovery for 2026 data formats."""
+class SmartQuantEngine:
+    """Handles smart ticker searching and technical auditing."""
     
     @staticmethod
-    @st.cache_data(ttl=300)
-    def fetch_market_data(symbol, interval, retries=3):
-        """Fetches data with retry logic and forced column flattening to prevent blank charts."""
-        symbol = symbol.strip().upper()
-        if not (symbol.endswith(".NS") or symbol.endswith(".BO")):
-            symbol += ".NS"
-
-        # Safe historical window mapping for 2026 yfinance constraints
-        period_map = {"5m": "5d", "15m": "7d", "1h": "60d", "1d": "max"}
-        period = period_map.get(interval, "1mo")
-
-        for attempt in range(retries):
-            try:
-                # auto_adjust=True is critical for clean OHLC data
-                df = yf.download(symbol, interval=interval, period=period, progress=False, auto_adjust=True)
-                
+    @st.cache_data(ttl=60)
+    def fetch_data(user_input, interval):
+        """
+        Smart Search: Automatically adds .NS for Indian stocks if the user 
+        forgets, making it beginner-friendly.
+        """
+        try:
+            query = user_input.strip().upper()
+            
+            # --- BEGINNER FRIENDLY LOGIC ---
+            # If it's a standard name like 'RELIANCE', we try adding .NS (NSE) 
+            # so the beginner doesn't have to know technical suffixes.
+            possible_tickers = [query]
+            if "." not in query:
+                possible_tickers.insert(0, f"{query}.NS")
+            
+            df = pd.DataFrame()
+            final_symbol = query
+            
+            for ticker in possible_tickers:
+                # Dynamic period mapping for 2026 data stability
+                period = "60d" if interval in ["15m", "1h"] else "max"
+                df = yf.download(ticker, interval=interval, period=period, progress=False, auto_adjust=True)
                 if not df.empty:
-                    # --- THE 2026 DATA FIX: FLATTEN MULTI-INDEX ---
-                    # Prevents "Terminal Connection Failure" caused by nested headers
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.get_level_values(0)
-                    
-                    df.index = pd.to_datetime(df.index)
-                    return df, symbol
-                
-                time.sleep(1) # Interval pause for network stability
-            except Exception as e:
-                if attempt == retries - 1:
-                    return None, symbol
-        return None, symbol
+                    final_symbol = ticker
+                    break
+            
+            if df.empty:
+                return None, query
+
+            # --- 2026 DATA FIX: FLATTEN MULTI-INDEX HEADERS ---
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            
+            df.index = pd.to_datetime(df.index)
+            return df, final_symbol
+        except Exception:
+            return None, user_input
 
     @staticmethod
-    def calculate_audit_technicals(df):
-        """Vectorized technical library for professional auditing."""
-        # 1. RSI (14 Period) - Momentum
+    def apply_technicals(df):
+        # RSI 14 (Relative Strength Index)
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+        df['RSI'] = 100 - (100 / (1 + (gain / loss)))
 
-        # 2. Institutional Moving Averages
+        # VWAP (Volume Weighted Average Price)
+        tp = (df['High'] + df['Low'] + df['Close']) / 3
+        df['VWAP'] = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
+
+        # Institutional Moving Averages
         df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
         df['SMA_50'] = df['Close'].rolling(window=50).mean()
-        df['SMA_200'] = df['Close'].rolling(window=200).mean()
         
-        # 3. VWAP (Volume Weighted Average Price)
-        typical_price = (df['High'] + df['Low'] + df['Close']) / 3
-        df['VWAP'] = (typical_price * df['Volume']).cumsum() / df['Volume'].cumsum()
-
-        # 4. Yearly Benchmarks
-        df['52W_High'] = df['High'].rolling(window=252, min_periods=1).max()
-        df['52W_Low'] = df['Low'].rolling(window=252, min_periods=1).min()
-        df['20D_Avg_Vol'] = df['Volume'].rolling(window=20).mean()
+        # High/Low Benchmarks
+        df['52W_H'] = df['High'].rolling(window=252, min_periods=1).max()
+        df['52W_L'] = df['Low'].rolling(window=252, min_periods=1).min()
         
-        # 5. Volatility Analysis
-        df['Day_Chg_Pct'] = df['Close'].pct_change() * 100
-
         return df
 
 # ==========================================================
-# 2. TERMINAL USER INTERFACE (DARK MODE)
+# 2. UI ARCHITECTURE & STATE MANAGEMENT
 # ==========================================================
 
-st.set_page_config(page_title="Quant Terminal Pro v3.0", layout="wide")
+st.set_page_config(page_title="QuantPro Terminal", layout="wide", page_icon="💎")
 
-# CSS for Dark Professional Aesthetic (Matching #131722)
+# Initialize App Memory
+if 'app_state' not in st.session_state:
+    st.session_state.app_state = "welcome" 
+if 'watchlist' not in st.session_state:
+    st.session_state.watchlist = ["RELIANCE", "ZOMATO", "TCS", "IRFC"]
+if 'active_ticker' not in st.session_state:
+    st.session_state.active_ticker = "RELIANCE"
+
+# Professional Theme Injection
 st.markdown("""
     <style>
-    .main { background-color: #131722; color: #d1d4dc; }
-    div[data-testid="stMetric"] { background-color: #1e222d; border: 1px solid #363c4e; border-radius: 10px; padding: 15px; }
-    [data-testid="stMetricValue"] { color: #2962ff !important; font-family: 'Courier New', monospace; font-weight: bold; }
-    .stSidebar { background-color: #131722 !important; border-right: 1px solid #363c4e; }
-    .stDataFrame { background-color: #1e222d; border-radius: 8px; }
-    h1, h2, h3 { color: #ffffff; }
-    hr { border: 1px solid #363c4e; }
+    .stApp { background-color: #0d1117; color: #c9d1d9; }
+    div[data-testid="stMetric"] { background-color: #161b22; border: 1px solid #30363d; border-radius: 12px; }
+    .stSidebar { background-color: #161b22 !important; border-right: 1px solid #30363d; }
+    .welcome-card { text-align: center; padding: 80px 20px; }
     </style>
     """, unsafe_allow_html=True)
 
-# SIDEBAR: Terminal Controls
-st.sidebar.title("💎 Quant Terminal")
-st.sidebar.caption("v3.0 Institutional Master")
-ticker_input = st.sidebar.text_input("Enter NSE Ticker:", "RELIANCE").upper()
-interval_input = st.sidebar.selectbox("Analysis Interval:", ["5m", "15m", "1h", "1d"], index=1)
+# ==========================================================
+# 3. SIDEBAR: NAVIGATION & WATCHLIST
+# ==========================================================
 
-# EXECUTION FLOW
-engine = QuantEngine()
-raw_data, full_symbol = engine.fetch_market_data(ticker_input, interval_input)
+st.sidebar.title("💎 QuantPro")
+st.sidebar.caption("v3.0 Institutional Edition")
 
-if raw_data is not None:
-    # Generate Technicals
-    df = engine.calculate_audit_technicals(raw_data)
-    last_tick = df.iloc[-1]
-    
-    # --- HEADER SECTION ---
-    st.title(f"📊 {full_symbol} Intelligence Report")
-    
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    kpi1.metric("LTP (Price)", f"₹{last_tick['Close']:,.2f}", f"{last_tick['Day_Chg_Pct']:.2f}%")
-    kpi2.metric("RSI (14)", f"{last_tick['RSI']:.2f}")
-    kpi3.metric("VWAP", f"₹{last_tick['VWAP']:,.2f}")
-    
-    # RSI Based Signal Logic
-    rsi_val = last_tick['RSI']
-    action, signal_col = ("BUY", "green") if rsi_val < 35 else ("SELL", "red") if rsi_val > 65 else ("HOLD", "gray")
-    kpi4.markdown(f"**Terminal Signal:**\n### :{signal_col}[{action}]")
+if st.sidebar.button("🏠 Home / Welcome Screen", use_container_width=True):
+    st.session_state.app_state = "welcome"
+    st.rerun()
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("📌 Your Watchlist")
+for item in st.session_state.watchlist:
+    cols = st.sidebar.columns([4, 1])
+    if cols[0].button(f"📊 {item}", key=f"nav_{item}", use_container_width=True):
+        st.session_state.active_ticker = item
+        st.session_state.app_state = "terminal"
+        st.rerun()
+    if cols[1].button("✖", key=f"del_{item}"):
+        st.session_state.watchlist.remove(item)
+        st.rerun()
+
+st.sidebar.markdown("---")
+# BEGINNER FRIENDLY SEARCH
+search_q = st.sidebar.text_input("🔍 Search Any Stock", placeholder="e.g. INFOSYS").upper()
+if st.sidebar.button("Launch Analysis", use_container_width=True):
+    if search_q:
+        if search_q not in st.session_state.watchlist:
+            st.session_state.watchlist.append(search_q)
+        st.session_state.active_ticker = search_q
+        st.session_state.app_state = "terminal"
+        st.rerun()
+
+# ==========================================================
+# 4. PAGE ROUTING
+# ==========================================================
+
+if st.session_state.app_state == "welcome":
+    # --- WELCOME / SPLASH SCREEN ---
+    st.markdown("<div class='welcome-card'>", unsafe_allow_html=True)
+    st.title("Welcome to QuantPro")
+    st.subheader("Professional Grade Market Auditing for Everyone")
+    
+    
+    
+    st.write("Analyze momentum, institutional VWAP, and key technical levels with one click.")
+    
+    c1, c2, c3 = st.columns([2, 1, 2])
+    if c2.button("🚀 Open Terminal", use_container_width=True):
+        st.session_state.app_state = "terminal"
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+    
     st.markdown("---")
+    f1, f2, f3 = st.columns(3)
+    f1.info("💡 **Smart Search**\n\nJust type the name. We handle the technical suffixes automatically.")
+    f2.success("📈 **Momentum Tools**\n\nDeep RSI analysis with full historical scroll control.")
+    f3.warning("📋 **Quick Watchlist**\n\nSave your favorite assets and switch between them instantly.")
 
-    # --- TECHNICAL SCORECARD (TABULAR GRID) ---
-    st.subheader("📋 Fundamental & Technical Scorecard")
+elif st.session_state.app_state == "terminal":
+    # --- TERMINAL / DASHBOARD PAGE ---
+    engine = SmartQuantEngine()
+    interval = st.sidebar.selectbox("⏱️ Timeframe", ["15m", "1h", "1d"], index=0)
     
-    
-    t_col1, t_col2, t_col3, t_col4 = st.columns(4)
-    
-    with t_col1:
-        st.write("**Session Data**")
-        st.write(f"Open: **{last_tick['Open']:,.2f}**")
-        st.write(f"High: **{last_tick['High']:,.2f}**")
-        st.write(f"Low: **{last_tick['Low']:,.2f}**")
-        st.write(f"Prev Close: **{df['Close'].iloc[-2]:,.2f}**")
+    data, ticker_identity = engine.fetch_data(st.session_state.active_ticker, interval)
 
-    with t_col2:
-        st.write("**Institutional Levels**")
-        st.write(f"VWAP: **{last_tick['VWAP']:,.2f}**")
-        st.write(f"EMA 20: **{last_tick['EMA_20']:,.2f}**")
-        st.write(f"SMA 50: **{last_tick['SMA_50']:,.2f}**")
-        st.write(f"SMA 200: **{last_tick['SMA_200']:,.2f}**")
+    if data is not None:
+        df = engine.apply_technicals(data)
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        # Header Row
+        h1, h2 = st.columns([3, 1])
+        h1.title(f"📊 {ticker_identity}")
+        
+        change_val = ((last['Close'] - prev['Close']) / prev['Close']) * 100
+        h2.metric("LTP", f"₹{last['Close']:,.2f}", f"{change_val:.2f}%")
 
-    with t_col3:
-        st.write("**Yearly Range**")
-        st.write(f"52W High: **{last_tick['52W_High']:,.2f}**")
-        st.write(f"52W Low: **{last_tick['52W_Low']:,.2f}**")
-        st.write(f"20D Avg Vol: **{int(last_tick['20D_Avg_Vol']):,}**")
-        st.write(f"Volume: **{int(last_tick['Volume']):,}**")
+        # TECHNICAL SCORECARD (GRID VIEW)
+        st.subheader("📋 Technical Scorecard")
+        
+        
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            st.write("**Session**")
+            st.write(f"Open: **{last['Open']:,.2f}**")
+            st.write(f"High: **{last['High']:,.2f}**")
+            st.write(f"Low: **{last['Low']:,.2f}**")
+        with s2:
+            st.write("**Institutional**")
+            st.write(f"VWAP: **{last['VWAP']:,.2f}**")
+            st.write(f"EMA 20: **{last['EMA_20']:,.2f}**")
+            st.write(f"SMA 50: **{last['SMA_50']:,.2f}**")
+        with s3:
+            st.write("**Benchmarks**")
+            st.write(f"52W H: **{last['52W_H']:,.2f}**")
+            st.write(f"52W L: **{last['52W_L']:,.2f}**")
+            st.write(f"Vol: **{int(last['Volume']):,}**")
+        with s4:
+            st.write("**Momentum**")
+            st.write(f"RSI (14): **{last['RSI']:.2f}**")
+            rsi_val = last['RSI']
+            zone = "OVERSOLD" if rsi_val < 30 else "OVERBOUGHT" if rsi_val > 70 else "NEUTRAL"
+            st.write(f"Zone: **{zone}**")
 
-    with t_col4:
-        st.write("**Momentum Stats**")
-        st.write(f"RSI Value: **{last_tick['RSI']:.2f}**")
-        st.write(f"Day Change: **{last_tick['Day_Chg_Pct']:.2f}%**")
-        zone = "Oversold" if rsi_val < 30 else "Overbought" if rsi_val > 70 else "Neutral"
-        st.write(f"Zone: **{zone}**")
+        st.markdown("---")
 
-    st.markdown("---")
+        # TABS: CHART & AUDIT
+        tab_chart, tab_audit = st.tabs(["📉 RSI Momentum Visualizer", "📝 Historical Audit Logs"])
 
-    # --- RSI MOMENTUM VISUALIZER ---
-    st.subheader("📈 Momentum Oscillator (RSI)")
-    
-    
-    rsi_fig = go.Figure()
-    
-    # RSI Trace
-    rsi_fig.add_trace(go.Scatter(
-        x=df.index, y=df['RSI'],
-        line=dict(color='#2962ff', width=2.5),
-        fill='toself', fillcolor='rgba(41, 98, 255, 0.05)',
-        name="RSI 14"
-    ))
-    
-    # Threshold Lines
-    rsi_fig.add_hline(y=70, line_dash="dash", line_color="#ef5350", annotation_text="Overbought")
-    rsi_fig.add_hline(y=30, line_dash="dash", line_color="#26a69a", annotation_text="Oversold")
-    
-    rsi_fig.update_layout(
-        height=450,
-        template="plotly_dark",
-        plot_bgcolor='#131722',
-        paper_bgcolor='#131722',
-        margin=dict(l=10, r=60, t=10, b=10),
-        xaxis=dict(gridcolor='#1e222d', rangeslider_visible=True, showgrid=True), # Scrollable
-        yaxis=dict(gridcolor='#1e222d', range=[0, 100], side="right", showgrid=True),
-        hovermode="x unified"
-    )
-    
-    st.plotly_chart(rsi_fig, use_container_width=True)
+        with tab_chart:
+            st.subheader("Relative Strength Index (RSI)")
+            
+            # --- THE SCROLLABLE CHART ---
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df['RSI'],
+                line=dict(color='#58a6ff', width=2),
+                fill='toself', fillcolor='rgba(88, 166, 255, 0.05)',
+                name="RSI"
+            ))
+            
+            fig.add_hline(y=70, line_dash="dash", line_color="#f85149", annotation_text="Overbought")
+            fig.add_hline(y=30, line_dash="dash", line_color="#3fb950", annotation_text="Oversold")
+            
+            fig.update_layout(
+                height=500, template="plotly_dark",
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                xaxis=dict(gridcolor='#30363d', rangeslider_visible=True, showgrid=True), # SCROLL ENABLED
+                yaxis=dict(gridcolor='#30363d', side="right", range=[0, 100]),
+                margin=dict(l=0, r=50, t=10, b=10)
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-    # --- HISTORICAL AUDIT TABLE ---
-    with st.expander("📝 View Full Institutional Audit Table"):
-        display_df = df[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'VWAP', 'EMA_20']].sort_index(ascending=False).head(100)
-        st.dataframe(display_df.style.format("{:,.2f}"), use_container_width=True)
+        with tab_audit:
+            st.subheader("Historical Quantitative Logs")
+            st.dataframe(df.sort_index(ascending=False).head(200), use_container_width=True)
 
-else:
-    st.error("⚠️ Terminal Connection Failure: Ensure the ticker is valid (e.g. TCS, IRFC) or check internet connection.")
-    st.info("Tip: Try searching for RELIANCE or ZOMATO to test connection.")
+    else:
+        st.error(f"Could not find data for '{st.session_state.active_ticker}'.")
+        st.info("Tip: Try searching for common names like RELIANCE, TCS, or HDFC.")
+
+st.sidebar.markdown("---")
+st.sidebar.caption("QuantPro Terminal v3.0 | Secure Build 2026")
